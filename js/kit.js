@@ -9,8 +9,10 @@
   const status = (t, s = '') => { $('kStatus').textContent = t; $('kStatus').dataset.state = s; };
   // model scale: the largest of 1:100, 1:200, 1:500, 1:1000 that keeps the model within about 2.5 m (1:100 only for small sites)
   const longM = Math.max(G.widthM, G.depthM), autoScale = longM * 10 <= 2500 ? 100 : longM * 5 <= 2500 ? 200 : longM * 2 <= 2500 ? 500 : 1000;
-  const opt = { board: 5, sheet: [841, 594], tile: 400, scale: autoScale };
+  const opt = { board: 5, lam: 1, sheet: [841, 594], tile: 400, scale: autoScale };
   try { Object.assign(opt, JSON.parse(localStorage.getItem('sitekit-kitopts') || '{}')); } catch (e) { }
+  if (!(opt.lam >= 1 && opt.lam <= 5)) opt.lam = 1;
+  const LT = () => opt.board * opt.lam;                       // layer thickness: board × sheets glued per layer
   try { const sc = JSON.parse(localStorage.getItem('sitekit-kitscale-' + pack.id) || 'null'); opt.scale = sc || autoScale; } catch (e) { opt.scale = autoScale; }
   let KS = 5, W = PW, H = PH, baseMM = [0, 0];               // KS: model mm per metre; W, H: model footprint (mm)
   function applyScale() {
@@ -19,19 +21,21 @@
     $('kFoot').textContent = `${Math.round(W)} × ${Math.round(H)} mm`; $('kBase').textContent = `${baseMM[0]} × ${baseMM[1]} mm`;
     document.querySelectorAll('[data-kscale]').forEach(el => el.textContent = '1:' + opt.scale);
     const b = $('kBoardSel'), v = b.value || opt.board;
-    b.innerHTML = [2, 3, 5].map(t => `<option value="${t}">${t} mm (${+(t / KS).toFixed(2)} m per layer)</option>`).join(''); b.value = v;
+    b.innerHTML = [1, 2, 3, 5].map(t => `<option value="${t}">${t} mm (${+(t / KS).toFixed(2)} m per sheet)</option>`).join(''); b.value = v;
+    const lb = $('kLam'), lv = lb.value || opt.lam, bt = +b.value || opt.board;
+    lb.innerHTML = [1, 2, 3, 4, 5].map(n => `<option value="${n}">${n === 1 ? '1 sheet' : n + ' sheets glued'}: ${+(n * bt / KS).toFixed(2)} m per layer</option>`).join(''); lb.value = lv;
     const big = Math.max(W, H) > 2600;
     $('kScaleNote').textContent = `At 1:${opt.scale} the model is ${(W / 1000).toFixed(2)} × ${(H / 1000).toFixed(2)} m.` + (big ? ' That is very large: it needs a lot of board and may take a few minutes to work out. A smaller scale may suit better.' : '');
     $('kScaleNote').dataset.state = big ? 'warn' : '';
   }
   $('kScale').value = String(opt.scale);
-  $('kBoardSel').value = opt.board; $('kSheet').value = opt.sheet.join('x'); $('kTile').value = opt.tile;
+  $('kBoardSel').value = opt.board; $('kLam').value = opt.lam; $('kSheet').value = opt.sheet.join('x'); $('kTile').value = opt.tile;
   const readOpt = () => {
-    opt.board = +$('kBoardSel').value; opt.sheet = $('kSheet').value.split('x').map(Number); opt.tile = +$('kTile').value; opt.scale = +$('kScale').value;
-    try { localStorage.setItem('sitekit-kitopts', JSON.stringify({ board: opt.board, sheet: opt.sheet, tile: opt.tile })); localStorage.setItem('sitekit-kitscale-' + pack.id, String(opt.scale)); } catch (e) { }
+    opt.board = +$('kBoardSel').value; opt.lam = +$('kLam').value || 1; opt.sheet = $('kSheet').value.split('x').map(Number); opt.tile = +$('kTile').value; opt.scale = +$('kScale').value;
+    try { localStorage.setItem('sitekit-kitopts', JSON.stringify({ board: opt.board, lam: opt.lam, sheet: opt.sheet, tile: opt.tile })); localStorage.setItem('sitekit-kitscale-' + pack.id, String(opt.scale)); } catch (e) { }
     applyScale();
   };
-  applyScale(); $('kBoardSel').value = opt.board;
+  applyScale(); $('kBoardSel').value = opt.board; $('kLam').value = opt.lam;
 
   // ---------- plan with tile grid
   const P = G.Plan($('kitPlan'));
@@ -51,7 +55,7 @@
   };
 
   // ---------- make the kit
-  let K = null, packed = null, sheetIx = 0, pieces = [];
+  let K = null, packed = null, sheetIx = 0, pieces = [], items = [];
   const prog = p => { $('kProg').firstElementChild.style.width = (p * 100).toFixed(0) + '%'; };
   function nestInWorker(items, sw, sh, onp) {
     return new Promise((res, rej) => {
@@ -61,54 +65,65 @@
       w.postMessage({ masks: items.map(p => p.mask), sheetW: sw, sheetH: sh });
     });
   }
-  const cacheKey = () => `sitekit-nest|${pack.id}|${pack.updated || pack.created || ''}|${opt.scale}|${opt.board}|${opt.sheet.join('x')}|${opt.tile}`;
-  async function make() {
+  const cacheKey = () => `sitekit-nest|${pack.id}|${pack.updated || pack.created || ''}|${opt.scale}|${opt.board}x${opt.lam}|${opt.sheet.join('x')}|${opt.tile}`;
+  async function make(auto) {
     readOpt(); P.draw();
     if (Math.max(W, H) > 2600 && !localStorage.getItem(cacheKey()) && !confirm(`At 1:${opt.scale} this model is ${(W / 1000).toFixed(1)} × ${(H / 1000).toFixed(1)} m and may take many minutes to work out. Continue?`)) return;
     $('kGo').disabled = true; $('kProg').hidden = false; ['dlZip', 'dlGuide', 'dlDXF'].forEach(id => $(id).disabled = true);
     try {
       status('Slicing the layers…'); prog(0);
-      K = await MM.buildSite(G.DEM, G.widthM, G.depthM, opt.board, { tileMM: opt.tile, rim: 15, scale: opt.scale }, p => prog(p * 0.3));
+      K = await MM.buildSite(G.DEM, G.widthM, G.depthM, LT(), { tileMM: opt.tile, rim: 15, scale: opt.scale }, p => prog(p * 0.3));
       pieces = K.layers.flatMap(l => l.pieces);
       if (!pieces.length) { status('This site is too flat for any layers at this board thickness.', 'err'); return; }
-      status(`Fitting ${pieces.length} pieces onto ${opt.sheet[0]} × ${opt.sheet[1]} mm sheets…`);
+      // laminated layers: every piece is cut opt.lam times, and the copies are glued into one thicker layer
+      items = opt.lam > 1 ? pieces.flatMap(p => Array.from({ length: opt.lam }, (_, c) => c ? Object.assign({}, p, { orig: p, copy: c }) : p)) : pieces;
+      status(`Fitting ${items.length} pieces onto ${opt.sheet[0]} × ${opt.sheet[1]} mm sheets…`);
       let res = null, key = cacheKey();
-      try { const c = JSON.parse(localStorage.getItem(key) || 'null'); if (c && c.n === pieces.length) res = c.r; } catch (e) { }
+      try { const c = JSON.parse(localStorage.getItem(key) || 'null'); if (c && c.n === items.length) res = c.r; } catch (e) { }
+      if (!res && items.length > 900) {                      // thin board at a large scale: thousands of pieces
+        const msg = `That is ${items.length} pieces to cut (${K.layers.length} layers${opt.lam > 1 ? `, each ${opt.lam} sheets` : ''}). Fitting them onto sheets may take several minutes, and it is a lot of cutting and gluing. A smaller scale (1:500 or 1:1000), or more sheets glued per layer, gives a far simpler model.`;
+        if (auto) { status(msg + ' Press Make the kit to go ahead anyway.', 'warn'); return; }
+        if (!confirm(msg + '\n\nContinue?')) { status(msg, 'warn'); return; }
+      }
       if (!res) {
-        try { res = await nestInWorker(pieces, opt.sheet[0], opt.sheet[1], p => prog(0.3 + p * 0.7)); }
+        try { res = await nestInWorker(items, opt.sheet[0], opt.sheet[1], p => prog(0.3 + p * 0.7)); }
         catch (e) {                                        // no workers (opened from a file): do it here
           await new Promise(r => setTimeout(r, 30));
-          const r2 = MM.nest(pieces.map((p, i) => ({ i, mask: p.mask })), opt.sheet[0], opt.sheet[1]);
+          const r2 = MM.nest(items.map((p, i) => ({ i, mask: p.mask })), opt.sheet[0], opt.sheet[1]);
           res = r2.error ? { error: r2.error } : { count: r2.count, g: r2.g, RES: r2.RES, margin: r2.margin, placed: r2.placed.map(p => [p.layer.i, p.sheet, p.cx, p.cy, p.rot]) };
         }
-        if (!res.error) try { localStorage.setItem(key, JSON.stringify({ n: pieces.length, r: res })); } catch (e) { }
+        if (!res.error) try { localStorage.setItem(key, JSON.stringify({ n: items.length, r: res })); } catch (e) { }
       }
       if (res.error) { status(res.error.replace('Layer undefined', 'A piece') + ' Choose a bigger sheet or smaller tiles.', 'err'); return; }
-      packed = { count: res.count, g: res.g, RES: res.RES, margin: res.margin, sheetW: opt.sheet[0], sheetH: opt.sheet[1], placed: res.placed.map(([i, sheet, cx, cy, rot]) => ({ layer: pieces[i], sheet, cx, cy, rot })) };
-      packed.placed.forEach(pl => pl.layer.sheet = pl.sheet + 1);
+      packed = { count: res.count, g: res.g, RES: res.RES, margin: res.margin, sheetW: opt.sheet[0], sheetH: opt.sheet[1], placed: res.placed.map(([i, sheet, cx, cy, rot]) => ({ layer: items[i], sheet, cx, cy, rot })) };
+      pieces.forEach(p => { p.sheet = 0; p.sheets = []; });
+      packed.placed.forEach(pl => { const o = pl.layer.orig || pl.layer; o.sheets.push(pl.sheet + 1); });
+      pieces.forEach(p => { p.sheets = [...new Set(p.sheets)].sort((a, b) => a - b); p.sheet = p.sheets[0] || 0; p.sheetTxt = p.sheets.map(pad).join(', '); });
+      items.forEach(p => { if (p.orig) { p.sheet = p.orig.sheet; p.sheetTxt = p.orig.sheetTxt; } });
       prog(1);
       const NL = K.layers.length, top = K.layers[NL - 1];
-      $('kInt').textContent = `${opt.board} mm = ${+(opt.board / KS).toFixed(2)} m`;
-      const dp = Number.isInteger(+(opt.board / KS).toFixed(3)) ? 0 : 1;
+      $('kInt').textContent = `${opt.lam > 1 ? opt.lam + ' × ' : ''}${opt.board} mm = ${+(LT() / KS).toFixed(2)} m`;
+      const dp = Number.isInteger(+(LT() / KS).toFixed(3)) ? 0 : 1;
       $('kLayers').textContent = `${NL} · ${G.fmt(K.layers[0].L, dp)} to ${G.fmt(top.L, dp)} m`;
-      $('kPieces').textContent = pieces.length; $('kHeight').textContent = `${NL * opt.board} mm + base`;
+      $('kPieces').textContent = opt.lam > 1 ? `${pieces.length} × ${opt.lam} = ${items.length}` : pieces.length; $('kHeight').textContent = `${NL * LT()} mm + base`;
       $('kBoard').textContent = `${packed.count} × ${opt.sheet[0] === 841 ? 'A1' : opt.sheet[0] === 594 ? 'A2' : opt.sheet.join('×')}, ${opt.board} mm`;
       $('materials').innerHTML = [
         `${packed.count} sheets of ${opt.board} mm greyboard at ${opt.sheet[0]} × ${opt.sheet[1]} mm, plus offcuts for test cuts`,
         `Baseboard ${baseMM[0]} × ${baseMM[1]} mm, 12 mm MDF or ply`,
+        ...(opt.lam > 1 ? [`Every piece is cut ${opt.lam} times: glue the ${opt.lam} copies with the same ID into one ${LT()} mm piece, edges lined up, before you build`] : []),
         'PVA wood glue, a fine spreader, pins, and weights (books work)',
         `${NL} envelopes or zip bags, one per layer, marked 01–${pad(NL)}`
       ].map(t => `<li>${esc(t)}</li>`).join('');
-      status(`Ready: ${NL} layers, ${pieces.length} pieces on ${packed.count} sheet${packed.count === 1 ? '' : 's'}.` + (pieces.filter(p => !p.label).length ? ` ${pieces.filter(p => !p.label).length} very small pieces have no room for an ID.` : ''), 'ok');
+      status(`Ready: ${NL} layers, ${pieces.length} pieces${opt.lam > 1 ? ` (each cut ${opt.lam} times and glued, ${items.length} to cut)` : ''} on ${packed.count} sheet${packed.count === 1 ? '' : 's'}.` + (items.length > 600 ? ` That is a lot of cutting and gluing: a smaller scale, or thicker layers, keeps it manageable.` : '') + (pieces.filter(p => !p.label).length ? (n => ` ${n} very small piece${n === 1 ? ' has' : 's have'} no room for an ID.`)(pieces.filter(p => !p.label).length) : ''), 'ok');
       ['dlZip', 'dlGuide', 'dlDXF'].forEach(id => $(id).disabled = false);
       sheetIx = 0; drawSheet(); viewer.load();
     } catch (e) { console.error(e); status('Could not make the kit: ' + e.message, 'err'); }
     finally { $('kGo').disabled = false; setTimeout(() => $('kProg').hidden = true, 400); }
   }
-  $('kGo').onclick = make;
+  $('kGo').onclick = () => make(false);
   // make it straight away when the page asks for it (window.KIT_AUTOMAKE) or when these settings were worked out before
-  setTimeout(() => { readOpt(); let cached = false; try { cached = !!localStorage.getItem(cacheKey()); } catch (e) { } if ((window.KIT_AUTOMAKE && Math.max(W, H) <= 2600) || cached) make(); }, 0);
-  ['kBoardSel', 'kSheet', 'kTile', 'kScale'].forEach(id => $(id).onchange = () => { readOpt(); P.draw(); status('Settings changed: press Make the kit.'); });
+  setTimeout(() => { readOpt(); let cached = false; try { cached = !!localStorage.getItem(cacheKey()); } catch (e) { } if ((window.KIT_AUTOMAKE && Math.max(W, H) <= 2600) || cached) make(!cached); }, 0);
+  ['kBoardSel', 'kLam', 'kSheet', 'kTile', 'kScale'].forEach(id => $(id).onchange = () => { readOpt(); P.draw(); status('Settings changed: press Make the kit.'); });
 
   function drawSheet() {
     if (!packed) return;
@@ -137,12 +152,12 @@
     const zip = new JSZip(), dir = zip.folder(`${SITE}_laser_sheets`);
     for (let i = 0; i < packed.count; i++) { const n = pad(i + 1); dir.file(`sheet_${n}.svg`, MM.toSVG(packed, i, `${pack.name} sheet ${n}`)); dir.file(`sheet_${n}.dxf`, MM.toDXF(packed, i)); }
     dir.file('all_sheets.pdf', sheetsPDF());
-    dir.file('README.txt', [`${pack.name} · site model kit`, `1:${opt.scale}, ${opt.board} mm board (${+(opt.board / KS).toFixed(2)} m per layer), ${K.layers.length} layers, ${pieces.length} pieces, ${packed.count} sheets of ${opt.sheet[0]} x ${opt.sheet[1]} mm.`, 'Red (CUT layer) = cut. Blue (ENGRAVE layer) = light score: where the next layer goes, and the piece ID.', 'Engrave first, then cut. Test settings on an offcut.', `Piece IDs: layer, tile row (A from the south) and column (1 from the west), part number. E.g. 14B2.1.`, `Baseboard ${baseMM[0]} x ${baseMM[1]} mm.`, pack.survey ? `Survey: ${pack.survey}.` : ''].join('\r\n'));
+    dir.file('README.txt', [`${pack.name} · site model kit`, `1:${opt.scale}, ${opt.board} mm board${opt.lam > 1 ? `, ${opt.lam} sheets glued per layer` : ''} (${+(LT() / KS).toFixed(2)} m per layer), ${K.layers.length} layers, ${pieces.length} pieces${opt.lam > 1 ? ` (each cut ${opt.lam} times: ${items.length} to cut)` : ''}, ${packed.count} sheets of ${opt.sheet[0]} x ${opt.sheet[1]} mm.`, 'Red (CUT layer) = cut. Blue (ENGRAVE layer) = light score: where the next layer goes, and the piece ID.', 'Engrave first, then cut. Test settings on an offcut.', `Piece IDs: layer, tile row (A from the south) and column (1 from the west), part number. E.g. 14B2.1.`, `Baseboard ${baseMM[0]} x ${baseMM[1]} mm.`, pack.survey ? `Survey: ${pack.survey}.` : ''].join('\r\n'));
     download(await zip.generateAsync({ type: 'blob' }), `${SITE}_laser_sheets.zip`);
   });
   $('dlDXF').onclick = () => busy('dlDXF', async () => {
     const o = ['0', 'SECTION', '2', 'ENTITIES'];
-    const IDX = Math.max(5, Math.round(5 * opt.board / KS));
+    const IDX = Math.max(5, Math.round(5 * LT() / KS));
     K.layers.forEach(ly => {
       const idx = Math.abs(ly.L / IDX - Math.round(ly.L / IDX)) < 1e-6, layer = idx ? 'CONTOUR_INDEX' : 'CONTOUR';
       ly.outline.forEach(l => {
@@ -159,8 +174,8 @@
     const PW = 420, PH = 297, NL = K.layers.length;
     doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.text(`${pack.name} · site model assembly guide`.slice(0, 80), 15, 20);
     doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
-    [`${[pack.place, pack.year].filter(Boolean).join(' · ')}    Made ${today()}`, `1:${opt.scale} · ${opt.board} mm board = ${+(opt.board / KS).toFixed(2)} m per layer · ${NL} layers from ${G.fmt(K.layers[0].L)} to ${G.fmt(K.layers[NL - 1].L)} m · ${pieces.length} pieces on ${packed.count} sheets of ${opt.sheet[0]} × ${opt.sheet[1]} mm`,
-      `Footprint ${Math.round(W)} × ${Math.round(H)} mm · baseboard ${baseMM[0]} × ${baseMM[1]} mm · height ${NL * opt.board} mm + base`,
+    [`${[pack.place, pack.year].filter(Boolean).join(' · ')}    Made ${today()}`, `1:${opt.scale} · ${opt.lam > 1 ? `${opt.lam} × ${opt.board} mm board glued` : `${opt.board} mm board`} = ${+(LT() / KS).toFixed(2)} m per layer · ${NL} layers from ${G.fmt(K.layers[0].L)} to ${G.fmt(K.layers[NL - 1].L)} m · ${pieces.length} pieces on ${packed.count} sheets of ${opt.sheet[0]} × ${opt.sheet[1]} mm`,
+      `Footprint ${Math.round(W)} × ${Math.round(H)} mm · baseboard ${baseMM[0]} × ${baseMM[1]} mm · height ${NL * LT()} mm + base`,
       G.relative ? 'Levels relative: 0 m is the lowest ground of the survey.' : 'Levels as given for the site.', pack.survey ? `Survey: ${pack.survey}` : ''].filter(Boolean).forEach((t, i) => doc.text(t, 15, 30 + i * 5.5));
     // overview: outline of every layer + tile grid labels
     const fit = (bx, by, bw, bh) => { const k = Math.min(bw / W, bh / H); return { k, X: x => bx + x * k, Y: y => by + bh - y * k }; };
@@ -172,6 +187,7 @@
     for (let y = opt.tile; y < H; y += opt.tile) doc.line(T.X(0), T.Y(y), T.X(W), T.Y(y));
     for (let r = 0; r * opt.tile < H; r++) for (let q = 0; q * opt.tile < W; q++) doc.text(`${rows[r] || 'Z'}${q + 1}`, T.X(q * opt.tile) + 2, T.Y(r * opt.tile) - 2);
     doc.setTextColor(0); doc.setFontSize(8); doc.text('Odd layers use this tile grid. Even layers shift it by half a tile in both directions, so joints never stack.', 15, PH - 10);
+    if (opt.lam > 1) doc.text(`Every piece is cut ${opt.lam} times. Glue the ${opt.lam} copies with the same ID into one ${LT()} mm piece, edges lined up, before you build.`, 15, PH - 5);
     // layer pages: 6 per page
     const per = 6, cw = (PW - 40) / 3, ch = (PH - 45) / 2;
     K.layers.forEach((ly, i) => {
@@ -182,7 +198,7 @@
       doc.setDrawColor(192, 67, 42); doc.setLineWidth(0.3);
       ly.pieces.forEach(pc => pc.loops.forEach(l => { for (let q = 0; q < l.length; q++) { const a = l[q], b = l[(q + 1) % l.length]; doc.line(F.X(a[0]), F.Y(a[1]), F.X(b[0]), F.Y(b[1])); } }));
       doc.setFontSize(4.2); doc.setTextColor(40);
-      ly.pieces.forEach(pc => { const a = pc.label ? pc.label.at : pc.loops[0][0]; doc.text(`${pc.id} s${pc.sheet}`, F.X(a[0]), F.Y(a[1]), { align: 'center' }); });
+      ly.pieces.forEach(pc => { const a = pc.label ? pc.label.at : pc.loops[0][0]; doc.text(`${pc.id} s${opt.lam > 1 ? pc.sheets.join(',') : pc.sheet}`, F.X(a[0]), F.Y(a[1]), { align: 'center' }); });
     });
     download(doc.output('blob'), `${SITE}_assembly_guide.pdf`);
   });
@@ -204,7 +220,7 @@
     function load() {
       meshes.forEach(m => { model.remove(m); m.geometry.dispose(); }); meshes = [];
       if (board) { model.remove(board); board.geometry.dispose(); }
-      T = opt.board; NL = K.layers.length; R = Math.max(W, H); model.position.set(-W / 2, 0, H / 2);
+      T = LT(); NL = K.layers.length; R = Math.max(W, H); model.position.set(-W / 2, 0, H / 2);
       cam.near = R / 200; cam.far = R * 30; cam.updateProjectionMatrix(); sun.position.set(-R * 0.55, R * 0.85, R * 0.4); fill.position.set(R * 0.5, R * 0.3, -R * 0.5);
       board = new THREE.Mesh(new THREE.BoxGeometry(baseMM[0], 12, baseMM[1]), new THREE.MeshStandardMaterial({ color: 0xa98d6c, roughness: 0.9 }));
       board.position.set(W / 2, -6, -H / 2); model.add(board);
@@ -226,7 +242,7 @@
       $('ht').textContent = `${top * T} mm`; $('lay').value = cur;
       const list = finished ? [] : meshes.filter(m => m.userData.li === cur).sort((a, b) => a.userData.pc.sheet - b.userData.pc.sheet || a.userData.pc.id.localeCompare(b.userData.pc.id));
       $('pcount').textContent = finished ? 'Model complete' : `${list.length} pieces on layer ${pad(cur)}`;
-      $('plist').innerHTML = list.map(m => `<li data-i="${meshes.indexOf(m)}" class="${m === picked ? 'on' : ''}" tabindex="0"><span>${m.userData.pc.id}</span><span>sheet ${pad(m.userData.pc.sheet)}</span></li>`).join('');
+      $('plist').innerHTML = list.map(m => `<li data-i="${meshes.indexOf(m)}" class="${m === picked ? 'on' : ''}" tabindex="0"><span>${m.userData.pc.id}</span><span>${opt.lam > 1 ? 'sheets ' + m.userData.pc.sheetTxt : 'sheet ' + pad(m.userData.pc.sheet)}</span></li>`).join('');
       $('all').setAttribute('aria-pressed', finished);
     }
     const go = n => { finished = false; picked = null; cur = Math.max(1, Math.min(NL, n)); apply(); };
@@ -261,7 +277,7 @@
     canvas.addEventListener('pointermove', ev => {
       if (!K) return;
       const m = hit(ev); if (m !== hover) { const old = hover; hover = m; if (old) paint(old); if (m) paint(m); }
-      if (m) { const p = m.userData.pc, r = stage.getBoundingClientRect(); tip.textContent = `${p.id} · layer ${pad(p.k)} (${G.fmt(p.L)} m) · sheet ${pad(p.sheet)}`; tip.style.left = Math.min(ev.clientX - r.left + 12, r.width - 260) + 'px'; tip.style.top = (ev.clientY - r.top + 12) + 'px'; tip.hidden = false; }
+      if (m) { const p = m.userData.pc, r = stage.getBoundingClientRect(); tip.textContent = `${p.id} · layer ${pad(p.k)} (${G.fmt(p.L)} m) · ${opt.lam > 1 ? 'sheets ' + p.sheetTxt : 'sheet ' + pad(p.sheet)}`; tip.style.left = Math.min(ev.clientX - r.left + 12, r.width - 260) + 'px'; tip.style.top = (ev.clientY - r.top + 12) + 'px'; tip.hidden = false; }
       else tip.hidden = true;
     });
     canvas.addEventListener('pointerleave', () => { tip.hidden = true; if (hover) { const o = hover; hover = null; paint(o); } });

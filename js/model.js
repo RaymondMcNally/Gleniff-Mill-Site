@@ -17,18 +17,20 @@
   const SIZE = { print: PRINT, mould: MOULD };
   const S = { size: 300, x: G.focus[0] - 150, y: G.focus[1] - 150, board: 5, sheet: [841, 594], hollow: true, name: '',
     output: 'card', cardSize: 300, base: 3, vex: 1, arrow: true, castBase: 10, lastPrint: 'print',
-    cncSize: 400, stock: 100, fit: 'true', cncBase: 6, cardKind: 'layers', spacing: 20, dpi: 254, tile: false, scale: 200 };
+    cncSize: 400, stock: 100, fit: 'true', cncBase: 6, cardKind: 'layers', spacing: 20, dpi: 254, tile: false, scale: 200, lam: 1 };
   const SCALES = [100, 200, 500, 1000];
   const BEDCNC = [2500, 1300];                             // Mantech Falcon 1325 bed, mm (Z travel 200 mm)
   try { const s = JSON.parse(localStorage.getItem(KEY) || 'null'); if (s) Object.assign(S, s); const n = localStorage.getItem('sitekit-name'); if (n && !S.name) S.name = n; } catch (e) { }
   if (!['layers', 'waffle', 'relief'].includes(S.cardKind)) S.cardKind = 'layers';
   if (!SCALES.includes(+S.scale)) S.scale = 200;
-  const MPM = () => S.scale / 1000;                          // metres on site per mm of model
+  if (![1, 2, 3, 4, 5].includes(+S.lam)) S.lam = 1;
+  const MPM = () => S.scale / 1000;
+  const LT = () => S.board * (S.cardKind === 'layers' ? S.lam : 1);   // layer thickness: sheets glued per contour × board                          // metres on site per mm of model
   const Q = () => S.size * S.scale / 200;                    // square side in plan units
   const mFmt = v => (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : v.toFixed(v < 10 ? 1 : 0));
   if (S.output === 'cnc') S.size = S.cncSize; else if (!SIZE[S.output]) S.output = 'card'; else S.size = SIZE[S.output];
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); localStorage.setItem('sitekit-name', S.name); } catch (e) { } };
-  $('mSize').value = S.size; $('mBoard').value = S.board; $('mSheet').value = S.sheet.join('x'); $('mHollow').checked = S.hollow; $('mName').value = S.name;
+  $('mSize').value = S.size; $('mBoard').value = S.board; $('mLam').value = S.lam; $('mSheet').value = S.sheet.join('x'); $('mHollow').checked = S.hollow; $('mName').value = S.name;
   $('mBase').value = S.base; $('mVex').value = S.vex; $('mArrow').checked = S.arrow; $('mCast').value = S.castBase;
   $('mSpacing').value = S.spacing; $('mDpi').value = S.dpi; $('mTile').checked = !!S.tile;
   $('mCncSize').value = S.cncSize; $('mStock').value = S.stock; $('mFit').value = S.fit; $('mCncBase').value = S.cncBase;
@@ -91,13 +93,15 @@
     document.querySelectorAll('[data-scale]').forEach(b => b.setAttribute('aria-pressed', +b.dataset.scale === S.scale));
     document.querySelectorAll('.js-ms').forEach(e => e.textContent = `1:${S.scale}`);
     const opt = (id, f) => [...$(id).options].forEach(o => o.textContent = f(o.value));
-    opt('mBoard', v => `${v} mm (${mFmt(v * MPM())} m layers)`);
+    opt('mBoard', v => `${v} mm · ${mFmt(v * MPM())} m`);
+    opt('mLam', v => `${v} sheet${+v === 1 ? '' : 's'} · ${mFmt(v * S.board * MPM())} m`);
     opt('mCncSize', v => `${v} × ${v} mm (${mFmt(v * MPM())} m)`);
     opt('mSpacing', v => `${v} mm (${mFmt(v * MPM())} m)`);
     $('mFit').options[0].textContent = `True scale (1:${S.scale})`; $('mVex').options[0].textContent = `True scale (1:${S.scale})`;
     $('specModel').textContent = `1:${S.scale}`; $('specPrint').textContent = `${PRINT} mm · ${mFmt(PRINT * MPM())} × ${mFmt(PRINT * MPM())} m`;
   }
-  $('mBoard').onchange = e => { S.board = +e.target.value; queue(); };
+  $('mBoard').onchange = e => { S.board = +e.target.value; scaleLabels(); queue(); };
+  $('mLam').onchange = e => { S.lam = +e.target.value; queue(); };
   $('mSheet').onchange = e => { S.sheet = e.target.value.split('x').map(Number); queue(); };
   $('mHollow').onchange = e => { S.hollow = e.target.checked; queue(); };
   $('mName').oninput = e => { S.name = e.target.value.trim(); save(); };
@@ -157,8 +161,8 @@
     pm = null; wf = null; rel = null;
     if (S.cardKind === 'waffle') return computeWaffle(sel);
     if (S.cardKind === 'relief') return computeRelief(sel);
-    const iv = S.board * MPM();
-    model = MM.buildModel(DEM, sel, S.board, { scale: S.scale, hollow: S.hollow, rim: 15, base: S.tile ? Math.floor(DEM.lo / iv + 1e-9) * iv : undefined });
+    const T = LT(), iv = T * MPM();
+    model = MM.buildModel(DEM, sel, T, { scale: S.scale, hollow: S.hollow, rim: 15, base: S.tile ? Math.floor(DEM.lo / iv + 1e-9) * iv : undefined });
     const Gm = Gcur = model.G;
     planLabels();
     $('oArea').textContent = `${(Gm.size).toFixed(0)} × ${(Gm.size).toFixed(0)} m`;
@@ -167,17 +171,20 @@
       status(Gm.coverage < 0.01 ? 'This square is outside the survey. Move it onto the site.' : 'This square is too flat for any layers at this board thickness.', 'err');
       draw3D(); $('sheetView').innerHTML = ''; return;
     }
-    packed = MM.nest(model.layers, S.sheet[0], S.sheet[1]);
+    // laminated layers: every layer is cut S.lam times and the copies glued into one thicker layer
+    const items = S.lam > 1 ? model.layers.flatMap(l => Array.from({ length: S.lam }, (_, c) => c ? Object.assign({}, l, { copy: c }) : l)) : model.layers;
+    packed = MM.nest(items, S.sheet[0], S.sheet[1]);
     if (packed.error) { status(packed.error, 'err'); return; }
     sheetSrc = { count: packed.count, svg: i => MM.toSVG(packed, i, 'sheet') };
     sheetIx = Math.min(sheetIx, packed.count - 1);
     $('oLevels').textContent = `${G.fmt(Gm.lo)} to ${G.fmt(Gm.hi)} m`;
-    $('oLayers').textContent = `${model.layers.length} × ${S.board} mm`;
+    $('oLayers').textContent = S.lam > 1 ? `${model.layers.length} × ${S.lam} sheets` : `${model.layers.length} × ${S.board} mm`;
     $('oSheets').textContent = `${packed.count} × ${S.sheet[0]}×${S.sheet[1]}`;
-    $('oHeight').textContent = `${model.layers.length * S.board} mm + base`;
+    $('oHeight').textContent = `${+(model.layers.length * T).toFixed(1)} mm + base`;
     $('oPaper').textContent = planPaper().name;
     const warn = Gm.coverage < 0.999 ? `About ${Math.round((1 - Gm.coverage) * 100)}% of this square is outside the survey and will be left at base level. ` : '';
-    status(warn + `Ready: ${model.layers.length} layers from ${G.fmt(model.layers[0].L)} m to ${G.fmt(model.layers[model.layers.length - 1].L)} m.`, warn ? 'warn' : 'ok');
+    const many = model.layers.length * S.lam > 120 ? ` That is ${model.layers.length * S.lam} sheets of card to cut and stack: a bigger contour interval (more sheets glued per contour) or a smaller scale keeps it manageable.` : '';
+    status(warn + `Ready: ${model.layers.length} layers from ${G.fmt(model.layers[0].L)} m to ${G.fmt(model.layers[model.layers.length - 1].L)} m` + (S.lam > 1 ? `, each ${S.lam} sheets of ${S.board} mm glued together (${model.layers.length * S.lam} pieces of card).` : '.') + many, warn || many ? 'warn' : 'ok');
     $('dlPlan').disabled = $('dlKit').disabled = false;
     draw3D(); drawSheet();
   }
@@ -394,8 +401,8 @@
     base.position.set(0, -bt / 2, 0); group.add(base);
     if (model) model.layers.forEach((ly, i) => {
       const shapes = ly.polys.map(p => { const s = new THREE.Shape(p.outer.map(([x, y]) => new THREE.Vector2(x - sz / 2, y - sz / 2))); p.holes.forEach(h => s.holes.push(new THREE.Path(h.map(([x, y]) => new THREE.Vector2(x - sz / 2, y - sz / 2))))); return s; });
-      const g = new THREE.ExtrudeGeometry(shapes, { depth: S.board, bevelEnabled: false, curveSegments: 1 });
-      g.rotateX(-Math.PI / 2); g.translate(0, i * S.board, 0);
+      const g = new THREE.ExtrudeGeometry(shapes, { depth: LT(), bevelEnabled: false, curveSegments: 1 });
+      g.rotateX(-Math.PI / 2); g.translate(0, i * LT(), 0);
       group.add(new THREE.Mesh(g, [new THREE.MeshStandardMaterial({ color: 0xa2a49f, roughness: 0.95 }), new THREE.MeshStandardMaterial({ color: 0x7d7f7a, roughness: 1 })]));
     });
     if (!fitted) fit3D();
@@ -600,13 +607,13 @@
 
   function makeGuidePDF() {
     const { jsPDF } = window.jspdf, doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-    const Gm = model.G, sheetOf = new Map(packed.placed.map(p => [p.layer.k, p.sheet + 1]));
+    const Gm = model.G, sheetOf = new Map(); packed.placed.forEach(p => { const k = p.layer.k; if (!sheetOf.has(k)) sheetOf.set(k, new Set()); sheetOf.get(k).add(p.sheet + 1); }); sheetOf.forEach((v, k) => sheetOf.set(k, [...v].join(',')));
     doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.text(`Your ${pack.name} model · assembly guide`.slice(0, 70), 15, 20);
     doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
-    const info = [`Name: ${S.name || '—'}    Date: ${today()}`, `Area: ${mFmt(Gm.size)} × ${mFmt(Gm.size)} m  ·  model ${S.size} × ${S.size} mm at 1:${S.scale}  ·  board ${S.board} mm (${mFmt(S.board * MPM())} m per layer)`,
+    const info = [`Name: ${S.name || '—'}    Date: ${today()}`, `Area: ${mFmt(Gm.size)} × ${mFmt(Gm.size)} m  ·  model ${S.size} × ${S.size} mm at 1:${S.scale}  ·  board ${S.board} mm${S.lam > 1 ? ` × ${S.lam} sheets glued per layer` : ''} (${mFmt(LT() * MPM())} m per layer)`,
       `${model.layers.length} layers, ${model.layers[0].L} m to ${model.layers[model.layers.length - 1].L} m  ·  ${packed.count} sheet(s) of ${S.sheet[0]} × ${S.sheet[1]} mm  ·  ${S.hollow ? 'hollow layers (15 mm glue strip)' : 'solid layers'}`];
     info.forEach((t, i) => doc.text(t, 15, 30 + i * 6));
-    const steps = ['1. Cut a base board exactly ' + S.size + ' × ' + S.size + ' mm.', '2. Laser: engrave (blue) first as a light score, then cut (red). Test on an offcut first.', `3. Each piece is engraved with its layer number and level, e.g. "07 ${Math.round(model.layers[Math.min(6, model.layers.length - 1)].L)}" (layer 07 and its level in metres).`, '4. Glue layer 01 to the base, square to the edges. Each layer sits on the blue line engraved on the layer below.', '5. Keep the cut-out middles of hollow layers: they are useful offcuts.'];
+    const steps = ['1. Cut a base board exactly ' + S.size + ' × ' + S.size + ' mm.', '2. Laser: engrave (blue) first as a light score, then cut (red). Test on an offcut first.', `3. Each piece is engraved with its layer number and level, e.g. "07 ${Math.round(model.layers[Math.min(6, model.layers.length - 1)].L)}" (layer 07 and its level in metres).`, '4. Glue layer 01 to the base, square to the edges. Each layer sits on the blue line engraved on the layer below.', '5. Keep the cut-out middles of hollow layers: they are useful offcuts.'].concat(S.lam > 1 ? [`6. Every layer is cut ${S.lam} times. Glue the ${S.lam} copies with the same number into one thick layer, edges lined up, before stacking.`] : []);
     steps.forEach((t, i) => doc.text(t, 15, 54 + i * 6));
     // table
     let y = 92; doc.setFontSize(8.5); doc.setFont('helvetica', 'bold'); doc.text('Layer', 15, y); doc.text('Level (m)', 35, y); doc.text('Sheet', 60, y); doc.setFont('helvetica', 'normal');
@@ -642,7 +649,7 @@
       dir.file('cutting_sheets.pdf', makeSheetsPDF());
       dir.file('assembly_guide.pdf', makeGuidePDF());
       dir.file(`plan_1-${planScale().ratio}.pdf`, await makePlanPDF());
-      dir.file('README.txt', [`${pack.name} · your site model`, `Name: ${S.name || '-'}`, `Model ${S.size} x ${S.size} mm at 1:${S.scale} (${mFmt(model.G.size)} x ${mFmt(model.G.size)} m), board ${S.board} mm, ${model.layers.length} layers.`, `Sheets: ${packed.count} x ${S.sheet[0]} x ${S.sheet[1]} mm. SVG, DXF and PDF hold the same linework, in mm.`, `Red (CUT layer) = cut. Blue (ENGRAVE layer) = light score: where the next layer goes, and the layer label.`, `Engrave first, then cut. Test settings on an offcut.`, pack.survey ? `Survey: ${pack.survey}.` : '', G.relative ? 'Levels relative: 0 m is the lowest ground of the survey.' : 'Levels as given for the site.'].join('\r\n'));
+      dir.file('README.txt', [`${pack.name} · your site model`, `Name: ${S.name || '-'}`, `Model ${S.size} x ${S.size} mm at 1:${S.scale} (${mFmt(model.G.size)} x ${mFmt(model.G.size)} m), board ${S.board} mm${S.lam > 1 ? ` (${S.lam} sheets glued per layer, so ${model.layers.length * S.lam} pieces)` : ''}, ${model.layers.length} layers.`, `Sheets: ${packed.count} x ${S.sheet[0]} x ${S.sheet[1]} mm. SVG, DXF and PDF hold the same linework, in mm.`, `Red (CUT layer) = cut. Blue (ENGRAVE layer) = light score: where the next layer goes, and the layer label.`, `Engrave first, then cut. Test settings on an offcut.`, pack.survey ? `Survey: ${pack.survey}.` : '', G.relative ? 'Levels relative: 0 m is the lowest ground of the survey.' : 'Levels as given for the site.'].join('\r\n'));
       download(await zip.generateAsync({ type: 'blob' }), `${slug()}_${SITE}_model_1-${S.scale}.zip`);
     } catch (e) { status('Could not make the files: ' + e.message, 'err'); }
     b.textContent = t; b.disabled = false;
