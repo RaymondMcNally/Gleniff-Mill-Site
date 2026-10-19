@@ -43,13 +43,19 @@ To preview locally: `python -m http.server` in this folder, then open http://loc
 - `sections.html` — Sections. It cuts the splat along any vertical plane drawn on the plan, with the lidar ground drawn solid. Controls:
   - section, 3D and plan views;
   - slice depth and a level above which the canopy is hidden;
-  - a section drawing as PDF (1:100, 1:200 or 1:500) or SVG, and a PNG of the view.
+  - a section drawing as PDF (1:100, 1:200 or 1:500) or SVG, and a PNG of the view;
+  - **Open big-screen window** (`sections.html?display`): the section full screen on a large monitor (F for full screen, R to reframe), following every move of the line. While it is connected the Sections page stops drawing its own 3D view so the graphics card draws the scan once (*Keep the 3D view on this screen too* turns that off); it sends a heartbeat every 2 s, so closing it hands the view back. A scan loaded from the computer is not passed to the big screen, which shows the site's own scan.
 
   It uses Spark 2.3.1 (`vendor/spark`) on three.js 0.180 (`vendor/three`, ES modules via an import map). The scan is **`data/gleniff-lite.spz`** (23.4 MB, 1.45 million splats, small enough for GitHub's web uploader): the full Terra scan (293 MB .ply, 3.69 million splats) thinned for the web, keeping every splat around the mill. It is not in the zip; copy it into `data/`. The page first looks for `data/gleniff-full.spz` (the whole scan as SPZ, 61.8 MB) and uses it if present; both share the same fit. The fit to the survey (turn 0.4°, east 309.25 m, north 89.5 m, up 66.766 m) is stored in `data/site.json` under `splat`. The older `data/gleniff-2026.glb` (2.04 million splats, Cesium download) is no longer used and can be deleted. Students can also load their own .spz, .ply, .sog or .glb scan and fit it to the survey.
 - `project.html` — Projection. It projects layers onto a white site model from a projector pointing straight down:
   - layers: elevation, hillshade, contours, slope for access, features, water level, sun and shadow, an image;
   - four-corner calibration plus lens height and projector offset, which corrects for the height of the model;
-  - a second projector window (`project.html?out`) kept in step by BroadcastChannel.
+  - a second projector window (`project.html?out`) kept in step by BroadcastChannel;
+  - **GIS layers** (`js/gis-layers.js`, with the map projections in `js/dem-import.js`): GeoJSON files from QGIS or ArcGIS, a GeoJSON or WFS URL, or an ArcGIS feature service layer (`…/FeatureServer/0`, fetched near the model only). Coordinates are read from the file or worked out (WGS 84, ITM, Irish Grid, Web Mercator, site metres). The Gleniff survey came from an STL in its own coordinates, so its map position is estimated from its latitude and longitude until the ITM easting and northing of its south-west corner is typed under *Where the data sits* (nudges and a turn for fine alignment). Per layer: colour, width, strength, fill, *Colour by* a field with a key, *Animate*. Kept in IndexedDB (`sitekit-gis`) and sent to the projector window;
+  - **Model scale** (1:200 to 1:2500), for the height correction, projector offsets and GIS line widths;
+  - **Section cut**: the cut from the Sections page drawn on the model (line, plane, viewing arrows, A/B, the cut-away side darkened), live over the BroadcastChannel `sitekit-link-gleniff`.
+
+  **Section on a big screen and on the model:** one computer with the monitor and projector as extended displays. Open the Projection page and its projector window (Section cut on), then the Sections page and its big-screen window; drag the line on the plan and both follow.
 
   Defaults suit a 2.55 m room: lens about 1400 mm above the table, 16:10 output. "Your model square" reads the square saved on `model.html`.
 - `js/sitepack.js` and `data/site.json` — the Gleniff survey as a Site Model Kit site pack. The pack holds a 0.4 m grid with the same levels as `data/dem.json`, the site features in metres, and the splat alignment `{yaw −0.5°, x 69.03, y 108.454, z 20.321, scale 1}`. The Sections and Projection pages are the same code as the multi-site Site Model Kit, so fixes can be copied across.
@@ -70,6 +76,7 @@ Change the story link in `index.html` (two places) for a new site.
 - `downloads/base/` — 1:500 (A2 ×2, A1) and 1:20,000 (A3) base underlays; regenerate with `tools/make_base.py`
 - `js/plan.js` — shared survey loader and plan drawing (used by sun.html and contours)
 - `js/sitepack.js` + `data/site.json` — the survey as a site pack, for the model, sections and projection pages and the splash
+- `js/gis-layers.js`, `js/dem-import.js` — GIS layers and map projections for the projection page (same files as the Site Model Kit)
 - `tools/` — the scripts that generated everything
 
 ## A new site next year
